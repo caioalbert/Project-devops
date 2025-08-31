@@ -1,0 +1,39 @@
+apiVersion: apm.k8s.elastic.co/v1
+kind: ApmServer
+metadata:
+  name: apm-server
+  namespace: logging
+spec:
+  version: 8.9.0
+  count: 1
+  elasticsearchRef:
+    name: elasticsearch
+  config:
+    apm-server:
+      host: "0.0.0.0:8200"
+    output.elasticsearch:
+      hosts: ["https://elasticsearch-es-http:9200"]
+  podTemplate:
+    spec:
+      containers:
+      - name: apm-server
+        resources:
+          limits:
+            memory: 512Mi
+            cpu: 500m
+          requests:
+            memory: 512Mi
+            cpu: 200m
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: apm-server-lb
+  namespace: logging
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 8200
+    targetPort: 8200
+  selector:
+    apm.k8s.elastic.co/name: apm-server
