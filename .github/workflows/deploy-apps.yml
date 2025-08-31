@@ -1,0 +1,82 @@
+name: Deploy Applications
+
+on:
+  repository_dispatch:
+    types: [infrastructure-ready]
+  push:
+    branches: [ main ]
+    paths: [ 'sample-app/**' ]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-west-2
+  ECR_REPOSITORY: sample-node-app
+
+jobs:
+  deploy-apps:
+    name: Deploy Applications
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Check if EKS cluster exists
+      run: |
+        if ! aws eks describe-cluster --name devops-eks --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
+          echo "❌ EKS cluster not found. Run infrastructure pipeline first."
+          exit 1
+        fi
+        echo "✅ EKS cluster found"
+
+    - name: Create ECR repository if not exists
+      run: |
+        aws ecr describe-repositories --repository-names $ECR_REPOSITORY --region ${{ env.AWS_REGION }} || \
+        aws ecr create-repository --repository-name $ECR_REPOSITORY --region ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Build, tag, and push image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        cd sample-app
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name devops-eks
+
+    - name: Update image in manifest
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        sed -i "s|image: sample-node-app:latest|image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG|g" sample-app/k8s-manifests.yaml
+
+    - name: Deploy sample application
+      run: |
+        kubectl apply -f sample-app/k8s-manifests.yaml
+
+    - name: Wait for deployment
+      run: |
+        kubectl rollout status deployment/sample-node-app -n sample-app --timeout=300s
+
+    - name: Get application URL
+      run: |
+        echo "🚀 Application deployed successfully!"
+        echo "Getting LoadBalancer URL..."
+        kubectl get svc sample-node-app -n sample-app

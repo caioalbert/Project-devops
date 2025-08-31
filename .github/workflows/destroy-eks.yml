@@ -1,0 +1,111 @@
+name: Destroy EKS Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_destroy:
+        description: 'Type "DESTROY" to confirm'
+        required: true
+        type: string
+
+env:
+  AWS_REGION: us-west-2
+
+jobs:
+  destroy:
+    name: Destroy Infrastructure
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Validate confirmation
+      if: ${{ github.event.inputs.confirm_destroy != 'DESTROY' }}
+      run: |
+        echo "❌ Confirmation failed. You must type 'DESTROY' to proceed."
+        exit 1
+
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.6.0
+
+    - name: Update kubeconfig (if cluster exists)
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name devops-eks || echo "Cluster not found, skipping kubeconfig"
+
+    - name: Delete Kubernetes resources first
+      run: |
+        # Delete applications
+        kubectl delete -f sample-app/k8s-manifests.yaml --ignore-not-found=true
+        
+        # Delete ArgoCD
+        kubectl delete -f argocd/ --ignore-not-found=true
+        
+        # Delete logging stack (order matters for ECK)
+        kubectl delete -f logging/fluentbit.yaml --ignore-not-found=true
+        kubectl delete -f logging/apm-server.yaml --ignore-not-found=true
+        kubectl delete -f logging/kibana.yaml --ignore-not-found=true
+        kubectl delete -f logging/elasticsearch.yaml --ignore-not-found=true
+        kubectl delete -f logging/eck-operator.yaml --ignore-not-found=true
+        
+        # Delete monitoring
+        kubectl delete -f monitoring/ --ignore-not-found=true
+        
+        # Delete namespaces
+        kubectl delete -f k8s-manifests/namespaces.yaml --ignore-not-found=true
+        
+        # Wait for resources to be deleted
+        echo "Waiting for resources to be cleaned up..."
+        sleep 60
+
+    - name: Setup Terraform Backend
+      working-directory: ./terraform
+      run: |
+        # Recreate backend.tf if it exists in state
+        BUCKET_NAME=$(aws s3 ls | grep terraform-state-eks-devops | awk '{print $3}' | head -1)
+        if [ ! -z "$BUCKET_NAME" ]; then
+          cat > backend.tf << EOF
+        terraform {
+          backend "s3" {
+            bucket         = "$BUCKET_NAME"
+            key            = "eks/terraform.tfstate"
+            region         = "${{ env.AWS_REGION }}"
+            encrypt        = true
+            dynamodb_table = "terraform-state-lock"
+          }
+        }
+        EOF
+        fi
+
+    - name: Terraform Init
+      working-directory: ./terraform
+      run: terraform init
+
+    - name: Terraform Destroy
+      working-directory: ./terraform
+      run: terraform destroy -auto-approve
+
+    - name: Clean up S3 bucket and DynamoDB
+      run: |
+        # Delete S3 bucket contents and bucket
+        BUCKET_NAME=$(aws s3 ls | grep terraform-state-eks-devops | awk '{print $3}' | head -1)
+        if [ ! -z "$BUCKET_NAME" ]; then
+          aws s3 rm s3://$BUCKET_NAME --recursive
+          aws s3 rb s3://$BUCKET_NAME
+        fi
+        
+        # Delete DynamoDB table
+        aws dynamodb delete-table --table-name terraform-state-lock --region ${{ env.AWS_REGION }} || echo "Table not found"
+
+    - name: Delete ECR repository
+      run: |
+        aws ecr delete-repository --repository-name sample-node-app --region ${{ env.AWS_REGION }} --force || echo "Repository not found"

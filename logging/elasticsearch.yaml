@@ -16,11 +16,11 @@ spec:
         - name: elasticsearch
           resources:
             limits:
-              memory: 2Gi
-              cpu: 1
+              memory: 1Gi
+              cpu: 500m
             requests:
-              memory: 2Gi
-              cpu: 0.5
+              memory: 1Gi
+              cpu: 200m
     volumeClaimTemplates:
     - metadata:
         name: elasticsearch-data
@@ -29,7 +29,7 @@ spec:
         - ReadWriteOnce
         resources:
           requests:
-            storage: 10Gi
+            storage: 5Gi
         storageClassName: gp2
 ---
 apiVersion: v1

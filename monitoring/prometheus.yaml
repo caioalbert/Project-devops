@@ -20,7 +20,7 @@ spec:
         storageClassName: gp2
         resources:
           requests:
-            storage: 10Gi
+            storage: 5Gi
   alerting:
     alertmanagers:
     - namespace: monitoring

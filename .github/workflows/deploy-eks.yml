@@ -31,6 +31,40 @@ jobs:
       with:
         terraform_version: ${{ env.TF_VERSION }}
 
+    - name: Setup Terraform Backend
+      working-directory: ./terraform
+      run: |
+        # Criar backend.tf com bucket dinâmico se não existir
+        if [ ! -f backend.tf ]; then
+          BUCKET_SUFFIX=$(openssl rand -hex 4)
+          BUCKET_NAME="terraform-state-eks-devops-${BUCKET_SUFFIX}"
+          
+          # Criar bucket
+          aws s3 mb s3://${BUCKET_NAME} --region ${{ env.AWS_REGION }}
+          aws s3api put-bucket-versioning --bucket ${BUCKET_NAME} --versioning-configuration Status=Enabled
+          
+          # Criar DynamoDB table
+          aws dynamodb create-table \
+            --table-name terraform-state-lock \
+            --attribute-definitions AttributeName=LockID,AttributeType=S \
+            --key-schema AttributeName=LockID,KeyType=HASH \
+            --provisioned-throughput ReadCapacityUnits=5,WriteCapacityUnits=5 \
+            --region ${{ env.AWS_REGION }} || true
+          
+          # Criar backend.tf
+          cat > backend.tf << EOF
+        terraform {
+          backend "s3" {
+            bucket         = "${BUCKET_NAME}"
+            key            = "eks/terraform.tfstate"
+            region         = "${{ env.AWS_REGION }}"
+            encrypt        = true
+            dynamodb_table = "terraform-state-lock"
+          }
+        }
+        EOF
+        fi
+
     - name: Terraform Init
       working-directory: ./terraform
       run: terraform init
@@ -47,8 +81,30 @@ jobs:
       run: |
         aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name devops-eks
 
-    - name: Deploy Kubernetes manifests
+    - name: Install CRDs
+      run: |
+        # Prometheus Operator CRDs
+        kubectl apply -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/main/example/prometheus-operator-crd/monitoring.coreos.com_alertmanagers.yaml
+        kubectl apply -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/main/example/prometheus-operator-crd/monitoring.coreos.com_prometheuses.yaml
+        kubectl apply -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/main/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml
+        kubectl apply -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/main/example/prometheus-operator-crd/monitoring.coreos.com_prometheusrules.yaml
+        
+        # ECK CRDs
+        kubectl apply -f https://download.elastic.co/downloads/eck/2.9.0/crds.yaml
+        
+        # ArgoCD CRDs
+        kubectl apply -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/crds/application-crd.yaml
+        kubectl apply -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/crds/appproject-crd.yaml
+
+    - name: Deploy base infrastructure
       run: |
         kubectl apply -f k8s-manifests/namespaces.yaml
         kubectl apply -f monitoring/
         kubectl apply -f logging/
+        kubectl apply -f argocd/
+
+    - name: Trigger applications deployment
+      uses: peter-evans/repository-dispatch@v2
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        event-type: infrastructure-ready
