@@ -30,11 +30,23 @@ jobs:
 
     - name: Check if EKS cluster exists
       run: |
-        if ! aws eks describe-cluster --name devops-eks --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
+        # Get cluster name from terraform state
+        if ! aws s3 ls | grep -q terraform-state-eks-devops; then
+          echo "❌ No terraform state found. Run infrastructure pipeline first."
+          exit 1
+        fi
+        
+        BUCKET_NAME=$(aws s3 ls | grep terraform-state-eks-devops | awk '{print $3}' | head -1)
+        aws s3 cp s3://$BUCKET_NAME/eks/terraform.tfstate terraform.tfstate
+        
+        CLUSTER_NAME=$(cat terraform.tfstate | jq -r '.outputs.cluster_name.value')
+        echo "CLUSTER_NAME=$CLUSTER_NAME" >> $GITHUB_ENV
+        
+        if ! aws eks describe-cluster --name $CLUSTER_NAME --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
           echo "❌ EKS cluster not found. Run infrastructure pipeline first."
           exit 1
         fi
-        echo "✅ EKS cluster found"
+        echo "✅ EKS cluster found: $CLUSTER_NAME"
 
     - name: Create ECR repository if not exists
       run: |
@@ -58,7 +70,7 @@ jobs:
 
     - name: Update kubeconfig
       run: |
-        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name devops-eks
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name $CLUSTER_NAME
 
     - name: Update image in manifest
       env:

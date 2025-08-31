@@ -12,6 +12,10 @@ provider "aws" {
   region = var.aws_region
 }
 
+resource "random_id" "cluster_suffix" {
+  byte_length = 4
+}
+
 data "aws_availability_zones" "available" {
   filter {
     name   = "opt-in-status"
@@ -19,11 +23,15 @@ data "aws_availability_zones" "available" {
   }
 }
 
+locals {
+  cluster_name = "${var.cluster_name}-${random_id.cluster_suffix.hex}"
+}
+
 module "vpc" {
   source = "terraform-aws-modules/vpc/aws"
   version = "~> 5.0"
 
-  name = "${var.cluster_name}-vpc"
+  name = "${local.cluster_name}-vpc"
   cidr = "10.0.0.0/16"
 
   azs             = slice(data.aws_availability_zones.available.names, 0, 3)
@@ -47,7 +55,7 @@ module "eks" {
   source = "terraform-aws-modules/eks/aws"
   version = "~> 19.0"
 
-  cluster_name    = var.cluster_name
+  cluster_name    = local.cluster_name
   cluster_version = "1.28"
 
   vpc_id                         = module.vpc.vpc_id
